@@ -1,0 +1,21 @@
+./memorysim < test1_part1.txt
+Usage: process_id,instruction_type,virtual_address,value
+Instruction?: Put page table for PID 0 into physical frame 0
+Mapped virtual address 53 (page 3) into physical frame 1
+Instruction?: Page already has value 1
+Instruction?: Altered page value from 1 to 0
+Instruction?: Mapped virtual address 4 (page 0) into physical frame 2
+Instruction?: Put page table for PID 1 into physical frame 3
+Error: Insufficient memory.
+Instruction?:
+----------------------------------------------------------------------
+./memorysim < test2_part1.txt
+Usage: process_id,instruction_type,virtual_address,value
+Instruction?: Put page table for PID 1 into physical frame 0
+Mapped virtual address 24 (page 1) into physical frame 1
+Instruction?: Altered page value from 0 to 1
+Instruction?: Put page table for PID 2 into physical frame 2
+Mapped virtual address 36 (page 2) into physical frame 3
+Instruction?: Error: Insufficient memory.
+Instruction?: 
+

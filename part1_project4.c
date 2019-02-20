@@ -12,6 +12,8 @@
 #define PFN 1 //page frame number byte offset in a PTE
 #define READ 0 //if page is readable
 #define WRITE 1 //if page is writeable
+#define PROTECTION 2 //protection bits offset in PTE
+#define VALID 3 //valid bits offset in PTE
 
 //Function definitions
 int map(unsigned char pid, unsigned char vaddress,unsigned char value);
@@ -27,25 +29,18 @@ typedef struct hardwarePointer{
 	int inMemory; //1 if in physical memory, 0 if not
 } hp;
 
-//memory, 64 bytes long
+//physical memory, 64 bytes long
 unsigned char memory[MEMORY_SIZE];
-//virtual memory. 64 bytes long, one for each process
-unsigned char vmem0[MEMORY_SIZE];
-unsigned char vmem1[MEMORY_SIZE];
-unsigned char vmem2[MEMORY_SIZE];
-unsigned char vmem3[MEMORY_SIZE];
 
 //contains the free pages, 0 if the page is free 1 if not
 int freepages[NUM_PAGES];
 
 //contains information on what process holds a page
 int pages[NUM_PAGES];
+int isPagetable[NUM_PAGES];
 
 //hardware pointer to the begginning of the page table for a process
 hp hardware[4];
-
-int linecount;
-int roundrobin;
 
 int main(){
 	printf("Usage: process_id,instruction_type,virtual_address,value\n");
@@ -86,7 +81,8 @@ int main(){
 		vaddress = atoi(token);
 		token = strtok(NULL,",");
 		int firstNum = token[0] - 48;
-		char lastChar = token[3];
+		char lastChar1 = token[1];
+		char lastChar2 = token[2];
 		value = atoi(token);
 		token = NULL;
 		if(pid < 0 || pid > 3){
@@ -95,7 +91,9 @@ int main(){
 		if(vaddress < 0 || vaddress > 63){
 			printf("Error: Virtual Address is not valid. Range [0,63].\n");
 		}
-		if((value >= 0 && value < 100) && lastChar != '\n'){
+		if((value >= 0 && value < 10) && (lastChar1 != '\n')){
+			printf("Error: Value not valid. Range [0,255].\n");
+		} else if((value >= 10 && value < 100) && (lastChar2 != '\n')){
 			printf("Error: Value not valid. Range [0,255].\n");
 		} else if((value >= 100 && value < 200) && firstNum > 1){
 			printf("Error: Value not valid. Range [0,255].\n");
@@ -104,7 +102,7 @@ int main(){
 		}
 		switch(instruction){
 			case 0:
-				//map(pid,vaddress,value);
+				map(pid,vaddress,value);
 				break;
 			case 1:
 				//store(pid,vaddress,value);
@@ -119,9 +117,48 @@ int main(){
 
 //creates a mapping in the page table between a virtual and physical address
 int map(unsigned char pid,unsigned char vaddress,unsigned char value){
-	if(findPte(pid,vaddress) == ERROR){
-
+	if(value < 0 || value > 1){
+		printf("Error: Map only accepts 0 and 1 as values. 0 = readable, 1 = readable and writeable.\n");
 	}
+	if(findPte(pid,vaddress) == ERROR){
+		int free1 = findFree();
+		if(free1 == ERROR){
+			printf("Error: Insufficient memory.\n");
+			return ERROR;
+		} else {
+			int p1 = free1/PAGE_SIZE;
+			hardware[pid].address = free1;
+			hardware[pid].inMemory = 1;
+			pages[p1] = pid;
+			isPagetable[p1] = 1;
+			for(int i = 0; i < NUM_PAGES; i++){
+				memory[free1 + (PTE_SIZE * i)] = i;
+				memory[free1 + (PTE_SIZE * i) + VALID] = 0;
+			}
+			printf("Put page table for PID %d into physical frame %d\n", pid, p1);
+		}
+	}
+	int pte = findPte(pid,vaddress);
+	if(memory[pte + VALID] == 2){
+		if(memory[pte + PROTECTION] == value){
+			printf("Page already has value %d\n",value);
+		}	else {
+			printf("Altered page value from %d to %d\n", memory[pte + PROTECTION], value);
+			memory[pte + PROTECTION] = value;
+		}
+		return 1;
+	}
+	int free2 = findFree();
+	if(free2 == ERROR){
+		printf("Error: Insufficient memory.\n");
+		return ERROR;
+	}
+	int p2 = free2/PAGE_SIZE;
+	pages[p2] = pid;
+	printf("Mapped virtual address %d (page %d) into physical frame %d\n", vaddress, vaddress/PAGE_SIZE, p2);
+	memory[pte + PFN] = free2;
+	memory[pte + PROTECTION] = value;
+	memory[pte + VALID] = 2;
 	return 1;
 }
 
@@ -137,7 +174,7 @@ int findPte(int pid, int vaddress){
 		pteAddress = (hardware[pid].address + (PTE_SIZE * vpage));
 		return pteAddress; //return pte address in phsyical memory
 	}
-	return ERROR;//return an error if it could not be found
+	return ERROR; //return an error if it could not be found
 }
 
 //returns an address for the start of a free page in memory
