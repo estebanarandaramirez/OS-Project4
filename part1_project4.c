@@ -3,13 +3,13 @@
 #include <string.h>
 #include <unistd.h>
 
-#define ERROR -1 //return if error in a function
+#define ERROR -2 //return if error in a function
 #define MEMORY_SIZE 64 //64 bytes for physical and virtual memory
 #define PAGE_SIZE 16 //16 bytes, size of a page
 #define NUM_PAGES 4 //number of pages
 #define PTE_SIZE 4 //4 bytes, size of a page table entry
 #define READ 0 //if page is readable
-#define WRITE 1 //if page is writeable
+#define WRITE 1 //if page is readable and writeable
 #define VPN 0 //virtual page number byte offset in a PTE
 #define PFN 1 //page frame number byte offset in a PTE
 #define PERMISSIONS 2 //permission bits offset in PTE
@@ -22,44 +22,55 @@ int load(unsigned char pid, unsigned char vaddress);
 int findPte(int pid, int vaddress);
 int findFree();
 int locate(int pid, int vaddress);
+void incrementrr();
+int freeMemory(int pid, int num);
+void evictPT(int pid);
+void evictP(int pid, int paddress);
+int pageToDisk(unsigned char *memory, int linenum, int start);
 
 typedef struct hardwarePointer{
-	int address; //address to memory
-	int inMemory; //1 if in physical memory, 0 if not
+	int address; //address to start of page table for a process
+	int inMemory; //2 if in disk(file), 1 if in physical memory, 0 otherwise
 } hp;
 
 //physical memory, 64 bytes long
 unsigned char memory[MEMORY_SIZE];
-
 //contains the free pages, 0 if the page is free 1 if not
 int freepages[NUM_PAGES];
-
 //contains information on what process holds a page
 int pages[NUM_PAGES];
+//contains information if page in memory is page table (1) or not (0)
 int isPagetable[NUM_PAGES];
-
+//round robin counter to swap out pages
+int roundrobin;
+//line counter in file representing disk
+int line;
 //hardware pointer to the begginning of the page table for a process
 hp hardware[4];
 
 int main(){
 	printf("Usage: process_id,instruction_type,virtual_address,value\n");
+	FILE* disk = fopen("disk.txt","w");
+	fclose(disk);
+	unsigned char pid, instruction = -1, vaddress, value = -1;
+	roundrobin = 0;
+	char input[20];
 	for(int i = 0; i < NUM_PAGES; i++){
 		hardware[i].inMemory = 0;
 		freepages[i] = 0;
+		isPagetable[i] = 0;
 		pages[i] = -1;
 	}
-	unsigned char pid, instruction = -1, vaddress, value = -1;
-	char input[20];
 	while(1){
 		char * token;
 		printf("Instruction?: ");
-		if(fgets(input, 20, stdin)==NULL){
+		if(fgets(input, 20, stdin) == NULL){
 			printf("\n");
 			return 0;
 		}
 		while(input[0] == '\0' || input[0] == '\n' || input[1] =='\0' || input[1] =='\n'){
 			printf("Instruction?:");
-			if(fgets(input, 20, stdin)==NULL){
+			if(fgets(input, 20, stdin) == NULL){
 			  printf("\n");
 			  return 0;
 		  }
@@ -74,7 +85,7 @@ int main(){
 		} else if(token[0] =='l' && token[1] =='o' && token[2] == 'a' && token[3] == 'd'){
 			instruction = 2;
 		} else {
-			printf("Error: InPRESENT instruction. Valid instructions: map, load, store.\n");
+			printf("Error: Invalid instruction. Valid instructions: map, load, store.\n");
 		}
 		token = strtok(NULL,",");
 		vaddress = atoi(token);
@@ -120,43 +131,48 @@ int map(unsigned char pid,unsigned char vaddress,unsigned char value){
 		printf("Error: Map only accepts 0 and 1 as values. 0 = readable, 1 = readable and writeable.\n");
 		return ERROR;
 	}
-	if(findPte(pid,vaddress) == ERROR){
+	int pte = findPte(pid,vaddress);
+	if(pte == ERROR){
 		int free1 = findFree();
 		if(free1 == ERROR){
-			printf("Error: Insufficient memory.\n");
-			return ERROR;
-		} else {
-			int p1 = free1/PAGE_SIZE;
-			hardware[pid].address = free1;
-			hardware[pid].inMemory = 1;
-			pages[p1] = pid;
-			isPagetable[p1] = 1;
-			for(int i = 0; i < NUM_PAGES; i++){
-				memory[free1 + (PTE_SIZE * i)] = i;
-				memory[free1 + (PTE_SIZE * i) + PRESENT] = 0;
-			}
-			printf("Put page table for PID %d into physical frame %d\n", pid, p1);
+			freeMemory(pid, 1);
+			free1 = findFree();
 		}
+		int p1 = free1/PAGE_SIZE;
+		hardware[pid].address = free1;
+		hardware[pid].inMemory = 1;
+		pages[p1] = pid;
+		isPagetable[p1] = 1;
+		for(int i = 0; i < NUM_PAGES; i++){
+			memory[free1 + (PTE_SIZE * i)] = i;
+			memory[free1 + (PTE_SIZE * i) + PRESENT] = 0;
+		}
+		printf("Put page table for PID %d into physical frame %d\n", pid, p1);
+	} else if(pte == -1){
+		freeMemory(pid, 1);
 	}
-	int pte = findPte(pid,vaddress);
+
+	pte = findPte(pid,vaddress);
 	if(memory[pte + PRESENT] == 1){
 		if(memory[pte + PERMISSIONS] == value){
-			printf("Page already has value %d\n",value);
+			printf("Error: Page already has value %d\n",value);
+			return ERROR;
 		}	else {
-			printf("Altered page value from %d to %d\n", memory[pte + PERMISSIONS], value);
+			printf("Updating permissions from %d to %d\n", memory[pte + PERMISSIONS], value);
 			memory[pte + PERMISSIONS] = value;
 		}
 		return 0;
 	}
+
 	int free2 = findFree();
 	if(free2 == ERROR){
-		printf("Error: Insufficient memory.\n");
-		return ERROR;
+		freeMemory(pid, 1);
+		free2 = findFree();
 	}
 	int p2 = free2/PAGE_SIZE;
 	pages[p2] = pid;
 	isPagetable[p2] = 0;
-	printf("Mapped virtual address %d (page %d) into physical frame %d\n", vaddress, vaddress/PAGE_SIZE, p2);
+	printf("Mapped virtual address %d (page %d) for PID %d into physical frame %d\n", vaddress, vaddress/PAGE_SIZE, pid, p2);
 	memory[pte + PFN] = free2;
 	memory[pte + PERMISSIONS] = value;
 	memory[pte + PRESENT] = 1;
@@ -176,7 +192,7 @@ int store(unsigned char pid, unsigned char vaddress, unsigned char value){
 			return ERROR;
 		}
 		if(memory[pte + PERMISSIONS] == READ){
-			printf("Error: Virtual address %d is not writeable \n", vaddress);
+			printf("Error: Writes are not allowed to this page \n");
 			return ERROR;
 		} else if(memory[pte + PERMISSIONS] == WRITE){
 			memory[paddress] = value;
@@ -206,17 +222,21 @@ int load(unsigned char pid, unsigned char vaddress){
 
 //returns pte address for the given virtual address for the given pid
 int findPte(int pid, int vaddress){
-	int pteAddress;
-	int vpage = 0;
-	while(vaddress >= 16){
-		vaddress -= 16;
-		vpage++;
-	}
-	if(hardware[pid].inMemory == 1){
+	if(hardware[pid].inMemory == 0){
+		return ERROR; //return an error if it could not be found
+	} else if(hardware[pid].inMemory == 1){
+		int pteAddress;
+		int vpage = 0;
+		while(vaddress >= 16){
+			vaddress -= 16;
+			vpage++;
+		}
 		pteAddress = (hardware[pid].address + (PTE_SIZE * vpage));
 		return pteAddress; //return pte address in phsyical memory
+	} else if(hardware[pid].inMemory == 2){
+		return -1;
 	}
-	return ERROR; //return an error if it could not be found
+	return ERROR;
 }
 
 //returns an address for the start of a free page in memory
@@ -248,4 +268,76 @@ int locate(int pid, int vaddress){
 		return paddress; //return physical address
 	}
 	return ERROR; //physical address not located
+}
+
+void incrementrr(){
+	roundrobin++;
+	roundrobin = roundrobin % NUM_PAGES;
+}
+
+int freeMemory(int pid, int num){
+	int counter = 0;
+	for(int i = 0; i < NUM_PAGES; i++){
+		if(counter == num){
+			continue;
+		}
+		if(isPagetable[roundrobin] == 1){
+			if(pages[roundrobin] != pid) {
+				evictPT(pages[roundrobin]);
+				counter++;
+				incrementrr();
+				continue;
+			}
+		} else if(isPagetable[roundrobin] == 0){
+			evictP(pages[roundrobin], roundrobin * PAGE_SIZE);
+			counter++;
+			incrementrr();
+			continue;
+		}
+		incrementrr();
+	}
+	return 0;
+}
+
+void evictPT(int pid){
+	int pt = hardware[pid].address;
+	hardware[pid].address = pageToDisk(memory, line++, pt);
+	hardware[pid].inMemory = 2;
+	freepages[roundrobin] = 0;
+	isPagetable[roundrobin] = 0;
+	pages[roundrobin] = -1;
+	for(int i = 0; i < PAGE_SIZE; i++){
+		memory[pt + i] = 0;
+	}
+	printf("Swapped frame %d (page table for PID %d) into physical frame %d \n", roundrobin, pid, line - 1);
+}
+
+void evictP(int pid, int paddress){
+	int pte = hardware[pid].address;
+	int vpage = 0;
+	for(int i = 0; i < PTE_SIZE; i++){
+		if(memory[pte * i + 1] == paddress){
+			vpage = memory[pte * i];
+		}
+	}
+	int daddress = pageToDisk(memory, line++, paddress);
+	memory[pte + (PTE_SIZE * vpage) + PFN] = daddress;
+	memory[pte + (PTE_SIZE * vpage) + PRESENT] = 2;
+	freepages[roundrobin] = 0;
+	pages[roundrobin] = -1;
+	for(int i = 0; i < PAGE_SIZE; i++){
+		memory[pte + i] = 0;
+	}
+	printf("Swapped frame %d (PID %d) into physical frame %d \n", roundrobin, pid, line - 1);
+}
+
+int pageToDisk(unsigned char *memory, int linenum, int start){
+	FILE* disk = fopen("disk.txt","a");
+	fprintf(disk,"%d.",linenum);
+	for(int i = 0; i < NUM_PAGES; i++){
+		fprintf(disk,"%u ",memory[start + i]);
+	}
+	fprintf(disk,"%c",'\n');
+	fclose(disk);
+	return linenum;
 }
