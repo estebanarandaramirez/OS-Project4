@@ -8,12 +8,12 @@
 #define PAGE_SIZE 16 //16 bytes, size of a page
 #define NUM_PAGES 4 //number of pages
 #define PTE_SIZE 4 //4 bytes, size of a page table entry
-#define VPN 0 //virtual page number byte offset in a PTE
-#define PFN 1 //page frame number byte offset in a PTE
 #define READ 0 //if page is readable
 #define WRITE 1 //if page is writeable
-#define PROTECTION 2 //protection bits offset in PTE
-#define VALID 3 //valid bits offset in PTE
+#define VPN 0 //virtual page number byte offset in a PTE
+#define PFN 1 //page frame number byte offset in a PTE
+#define PERMISSIONS 2 //permission bits offset in PTE
+#define PRESENT 3 //present bits offset in PTE
 
 //Function definitions
 int map(unsigned char pid, unsigned char vaddress,unsigned char value);
@@ -21,8 +21,7 @@ int store(unsigned char pid, unsigned char vaddress,unsigned char value);
 int load(unsigned char pid, unsigned char vaddress);
 int findPte(int pid, int vaddress);
 int findFree();
-void robin();
-void freespace(int n, int pid);
+int locate(int pid, int vaddress);
 
 typedef struct hardwarePointer{
 	int address; //address to memory
@@ -75,7 +74,7 @@ int main(){
 		} else if(token[0] =='l' && token[1] =='o' && token[2] == 'a' && token[3] == 'd'){
 			instruction = 2;
 		} else {
-			printf("Error: Invalid instruction. Valid instructions: map, load, store.\n");
+			printf("Error: InPRESENT instruction. Valid instructions: map, load, store.\n");
 		}
 		token = strtok(NULL,",");
 		vaddress = atoi(token);
@@ -105,10 +104,10 @@ int main(){
 				map(pid,vaddress,value);
 				break;
 			case 1:
-				//store(pid,vaddress,value);
+				store(pid,vaddress,value);
 				break;
 			case 2:
-				//load(pid,vaddress);
+				load(pid,vaddress);
 				break;
 		}
 	}
@@ -119,6 +118,7 @@ int main(){
 int map(unsigned char pid,unsigned char vaddress,unsigned char value){
 	if(value < 0 || value > 1){
 		printf("Error: Map only accepts 0 and 1 as values. 0 = readable, 1 = readable and writeable.\n");
+		return ERROR;
 	}
 	if(findPte(pid,vaddress) == ERROR){
 		int free1 = findFree();
@@ -133,20 +133,20 @@ int map(unsigned char pid,unsigned char vaddress,unsigned char value){
 			isPagetable[p1] = 1;
 			for(int i = 0; i < NUM_PAGES; i++){
 				memory[free1 + (PTE_SIZE * i)] = i;
-				memory[free1 + (PTE_SIZE * i) + VALID] = 0;
+				memory[free1 + (PTE_SIZE * i) + PRESENT] = 0;
 			}
 			printf("Put page table for PID %d into physical frame %d\n", pid, p1);
 		}
 	}
 	int pte = findPte(pid,vaddress);
-	if(memory[pte + VALID] == 2){
-		if(memory[pte + PROTECTION] == value){
+	if(memory[pte + PRESENT] == 1){
+		if(memory[pte + PERMISSIONS] == value){
 			printf("Page already has value %d\n",value);
 		}	else {
-			printf("Altered page value from %d to %d\n", memory[pte + PROTECTION], value);
-			memory[pte + PROTECTION] = value;
+			printf("Altered page value from %d to %d\n", memory[pte + PERMISSIONS], value);
+			memory[pte + PERMISSIONS] = value;
 		}
-		return 1;
+		return 0;
 	}
 	int free2 = findFree();
 	if(free2 == ERROR){
@@ -155,11 +155,53 @@ int map(unsigned char pid,unsigned char vaddress,unsigned char value){
 	}
 	int p2 = free2/PAGE_SIZE;
 	pages[p2] = pid;
+	isPagetable[p2] = 0;
 	printf("Mapped virtual address %d (page %d) into physical frame %d\n", vaddress, vaddress/PAGE_SIZE, p2);
 	memory[pte + PFN] = free2;
-	memory[pte + PROTECTION] = value;
-	memory[pte + VALID] = 2;
-	return 1;
+	memory[pte + PERMISSIONS] = value;
+	memory[pte + PRESENT] = 1;
+	return 0;
+}
+
+//writes the supplied value into the phsyical memory location associated with the virtual address
+int store(unsigned char pid, unsigned char vaddress, unsigned char value){
+	int pte = findPte(pid,vaddress);
+	if(pte == ERROR){
+		printf("Error: Segmentation fault, memory hasn't been allocated for virtual address %d \n", vaddress);
+		return ERROR;
+	} else if(pte >= 0){
+		int paddress = locate(pid,vaddress);
+		if(paddress == ERROR){
+			printf("Error: Segmentation fault, memory hasn't been allocated for virtual address %d \n", vaddress);
+			return ERROR;
+		}
+		if(memory[pte + PERMISSIONS] == READ){
+			printf("Error: Virtual address %d is not writeable \n", vaddress);
+			return ERROR;
+		} else if(memory[pte + PERMISSIONS] == WRITE){
+			memory[paddress] = value;
+			printf("Stored value %d at virtual address %d (physical address %d)\n", value, vaddress, paddress);
+		}
+	}
+	return 0;
+}
+
+//returns the byte stored at the memory location specified by the virtual address
+int load(unsigned char pid, unsigned char vaddress){
+	int pte = findPte(pid,vaddress);
+	if(pte == ERROR){
+		printf("Error: Segmentation fault, memory hasn't been allocated for virtual address %d \n", vaddress);
+		return ERROR;
+	} else if(pte >= 0){
+		int paddress = locate(pid,vaddress);
+		if(paddress == ERROR){
+			printf("Error: Segmentation fault, memory hasn't been allocated for virtual address %d \n", vaddress);
+			return ERROR;
+		}
+		int value = memory[paddress];
+		printf("The value %d is virtual address %d (physical address %d)\n", value, vaddress, paddress);
+	}
+	return 0;
 }
 
 //returns pte address for the given virtual address for the given pid
@@ -186,4 +228,24 @@ int findFree(){
 		}
 	}
 	return ERROR; //error because there are no free pages
+}
+
+//locates the physical address for the given virtual address for the specified process
+int locate(int pid, int vaddress){
+	if(hardware[pid].inMemory == 1){ //process page table is in memory
+		int vaddress_copy = vaddress;
+		int vpage = 0;
+		while(vaddress >= 16){
+			vaddress -= 16;
+			vpage++;
+		}
+		if(memory[hardware[pid].address + (PTE_SIZE * vpage) + PRESENT] == 0){
+			return ERROR; //phsyical memory has not been allocated for virtual address
+		}
+		int paddress = memory[hardware[pid].address + (PTE_SIZE * vpage) + PFN];
+		int offset = vaddress_copy - (PAGE_SIZE * vpage);
+		paddress += offset;
+		return paddress; //return physical address
+	}
+	return ERROR; //physical address not located
 }
